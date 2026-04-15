@@ -1,0 +1,279 @@
+:root {
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  color: #18211d;
+  background: #eef2ee;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.shell {
+  width: min(1120px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 28px 0 40px;
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 16px;
+  align-items: center;
+  padding-bottom: 20px;
+}
+
+.app-mark {
+  width: 48px;
+  height: 48px;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  color: #516159;
+  font-size: 0.88rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 0;
+  font-size: 2rem;
+  line-height: 1.15;
+}
+
+h2 {
+  margin-bottom: 18px;
+  font-size: 1.05rem;
+}
+
+.status {
+  border: 1px solid #b9c3bc;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-weight: 700;
+}
+
+.status.running {
+  color: #0a5f3b;
+  background: #dcf8e9;
+  border-color: #80cfa4;
+}
+
+.status.stopped {
+  color: #7b2727;
+  background: #ffe7e2;
+  border-color: #e1aaa0;
+}
+
+.notice,
+.sample {
+  border: 1px solid #cfd7d1;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+  margin-bottom: 18px;
+}
+
+.notice {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 0.7fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.notice strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+code,
+pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+code {
+  color: #14523a;
+}
+
+.settings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.panel {
+  border: 1px solid #cfd7d1;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 18px;
+}
+
+.grid {
+  display: grid;
+  gap: 14px;
+}
+
+.grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.span-two {
+  grid-column: 1 / -1;
+}
+
+label {
+  display: grid;
+  gap: 7px;
+  color: #3e4b44;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+input,
+select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid #b9c3bc;
+  border-radius: 8px;
+  color: #18211d;
+  background: #fbfdfb;
+  padding: 9px 11px;
+  outline: none;
+}
+
+input:focus,
+select:focus {
+  border-color: #19744e;
+  box-shadow: 0 0 0 3px rgba(25, 116, 78, 0.14);
+}
+
+.actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+button {
+  min-height: 42px;
+  border: 1px solid #12623e;
+  border-radius: 8px;
+  color: #ffffff;
+  background: #19744e;
+  padding: 9px 15px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #0f5f3d;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+button.secondary {
+  color: #18211d;
+  background: #ffffff;
+  border-color: #9cac9f;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #edf4ef;
+}
+
+button.danger {
+  background: #a63a2d;
+  border-color: #87291f;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #862b22;
+}
+
+.sample {
+  margin-top: 18px;
+}
+
+pre {
+  margin: 0;
+  border-radius: 8px;
+  background: #18211d;
+  color: #f3faf4;
+  padding: 16px;
+}
+
+.error {
+  margin: 12px 0 0;
+  color: #8a2c22;
+  font-weight: 700;
+}
+
+@media (max-width: 920px) {
+  .settings,
+  .notice {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .shell {
+    width: min(100% - 20px, 1120px);
+    padding-top: 16px;
+  }
+
+  .topbar {
+    grid-template-columns: auto 1fr;
+  }
+
+  .status {
+    grid-column: 1 / -1;
+    width: fit-content;
+  }
+
+  .grid.two {
+    grid-template-columns: 1fr;
+  }
+
+  .span-two {
+    grid-column: auto;
+  }
+
+  .actions {
+    justify-content: stretch;
+  }
+
+  button {
+    flex: 1 1 160px;
+  }
+}

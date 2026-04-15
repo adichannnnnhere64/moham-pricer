@@ -1,0 +1,21 @@
+services:
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_DATABASE: bugitik_test
+      MYSQL_USER: bugitik
+      MYSQL_PASSWORD: bugitik
+      MYSQL_ROOT_PASSWORD: bugitik_root
+    ports:
+      - "3307:3306"
+    volumes:
+      - bugitik-mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ubugitik", "-pbugitik"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  bugitik-mysql-data:
