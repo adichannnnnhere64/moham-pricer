@@ -1,8 +1,9 @@
 use axum::{
+    extract::ConnectInfo,
     extract::{rejection::JsonRejection, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::any,
     Json, Router,
 };
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
@@ -10,11 +11,18 @@ use sqlx::{
     mysql::{MySqlConnectOptions, MySqlPoolOptions},
     MySqlPool,
 };
-use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    net::SocketAddr,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::oneshot;
 
 const TOKEN_HEADER: &str = "x-api-token";
 const UPDATE_ITEM_PATH: &str = "/api/items";
+const REQUEST_HISTORY_LIMIT: usize = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +92,22 @@ pub struct ErrorResponse {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiRequestLog {
+    pub id: u64,
+    pub timestamp_ms: u64,
+    pub remote_addr: Option<String>,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub duration_ms: u64,
+    pub itemid: Option<String>,
+    pub message: String,
+}
+
+pub type RequestHistory = Arc<Mutex<VecDeque<ApiRequestLog>>>;
+
 #[derive(Debug)]
 pub struct ServerHandle {
     shutdown: Option<oneshot::Sender<()>>,
@@ -102,9 +126,13 @@ impl ServerHandle {
 struct ApiState {
     config: ServerConfig,
     pool: MySqlPool,
+    request_history: RequestHistory,
 }
 
-pub async fn start_server(config: ServerConfig) -> Result<ServerHandle, String> {
+pub async fn start_server(
+    config: ServerConfig,
+    request_history: RequestHistory,
+) -> Result<ServerHandle, String> {
     validate_config(&config)?;
 
     let bind_address = format!("{}:{}", config.bind_host, config.server_port);
@@ -112,10 +140,15 @@ pub async fn start_server(config: ServerConfig) -> Result<ServerHandle, String> 
         .map_err(|error| format!("Invalid bind address {bind_address}: {error}"))?;
 
     let pool = create_pool(&config).await?;
-    let state = ApiState { config, pool };
+    let state = ApiState {
+        config,
+        pool,
+        request_history,
+    };
     let router = Router::new()
-        .route(UPDATE_ITEM_PATH, post(update_item))
-        .route("/health", get(health))
+        .route(UPDATE_ITEM_PATH, any(update_item))
+        .route("/health", any(health))
+        .fallback(any(not_found))
         .with_state(Arc::new(state));
 
     let listener = tokio::net::TcpListener::bind(socket_addr)
@@ -127,7 +160,11 @@ pub async fn start_server(config: ServerConfig) -> Result<ServerHandle, String> 
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
-        let server = axum::serve(listener, router).with_graceful_shutdown(async {
+        let server = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
             let _ = shutdown_rx.await;
         });
 
@@ -151,54 +188,140 @@ pub async fn create_pool(config: &ServerConfig) -> Result<MySqlPool, String> {
         .password(&config.mysql_password);
 
     MySqlPoolOptions::new()
-        .max_connections(5)
+        .max_connections(64)
+        .min_connections(2)
         .acquire_timeout(Duration::from_secs(5))
+        .idle_timeout(Duration::from_secs(60))
+        .max_lifetime(Duration::from_secs(30 * 60))
         .connect_with(options)
         .await
         .map_err(|error| format!("Unable to connect to MySQL: {error}"))
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({
+async fn health(
+    State(state): State<Arc<ApiState>>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    method: Method,
+    uri: Uri,
+) -> Response {
+    let started = Instant::now();
+    let response = Json(serde_json::json!({
         "status": "success",
         "message": "server running"
     }))
+    .into_response();
+    log_request(
+        &state,
+        remote_addr,
+        &method,
+        &uri,
+        response.status(),
+        started,
+        None,
+        "server running".to_string(),
+    );
+    response
 }
 
 async fn update_item(
     State(state): State<Arc<ApiState>>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     payload: Result<Json<UpdatePayload>, JsonRejection>,
 ) -> Response {
+    let started = Instant::now();
+
+    if method != Method::POST {
+        let response = api_error(StatusCode::METHOD_NOT_ALLOWED, "Method not allowed.");
+        log_response(
+            &state,
+            remote_addr,
+            &method,
+            &uri,
+            &response,
+            started,
+            None,
+            "Method not allowed.",
+        );
+        return response;
+    }
+
     if !token_is_valid(&headers, &state.config.api_token) {
-        return api_error(StatusCode::UNAUTHORIZED, "Missing or invalid API token");
+        let response = api_error(StatusCode::UNAUTHORIZED, "Missing or invalid API token");
+        log_response(
+            &state,
+            remote_addr,
+            &method,
+            &uri,
+            &response,
+            started,
+            None,
+            "Missing or invalid API token",
+        );
+        return response;
     }
 
     let Ok(Json(payload)) = payload else {
-        return api_error(
+        let response = api_error(
             StatusCode::BAD_REQUEST,
             "Invalid input. Fields required: itemid, price, denomination.",
         );
+        log_response(
+            &state,
+            remote_addr,
+            &method,
+            &uri,
+            &response,
+            started,
+            None,
+            "Invalid input. Fields required: itemid, price, denomination.",
+        );
+        return response;
     };
 
+    let itemid = Some(payload.itemid.clone());
     if payload.itemid.trim().is_empty()
         || payload.price.trim().is_empty()
         || payload.denomination.trim().is_empty()
     {
-        return api_error(
+        let response = api_error(
             StatusCode::BAD_REQUEST,
             "Invalid input. Fields required: itemid, price, denomination.",
         );
+        log_response(
+            &state,
+            remote_addr,
+            &method,
+            &uri,
+            &response,
+            started,
+            itemid,
+            "Invalid input. Fields required: itemid, price, denomination.",
+        );
+        return response;
     }
 
     if payload.price.parse::<f64>().is_err() {
-        return api_error(
+        let response = api_error(
             StatusCode::BAD_REQUEST,
             "Invalid input. price must be numeric.",
         );
+        log_response(
+            &state,
+            remote_addr,
+            &method,
+            &uri,
+            &response,
+            started,
+            itemid,
+            "Invalid input. price must be numeric.",
+        );
+        return response;
     }
 
-    match execute_update(&state.config, &state.pool, &payload).await {
+    let response = match execute_update(&state.config, &state.pool, &payload).await {
         Ok(0) => api_error(StatusCode::NOT_FOUND, "No matching itemid was found."),
         Ok(_) => (
             StatusCode::OK,
@@ -210,7 +333,27 @@ async fn update_item(
         )
             .into_response(),
         Err(error) => api_error(StatusCode::INTERNAL_SERVER_ERROR, &error),
-    }
+    };
+    let status = response.status();
+    let message = if status == StatusCode::OK {
+        "successfully updated".to_string()
+    } else {
+        status
+            .canonical_reason()
+            .unwrap_or("request failed")
+            .to_string()
+    };
+    log_response(
+        &state,
+        remote_addr,
+        &method,
+        &uri,
+        &response,
+        started,
+        itemid,
+        &message,
+    );
+    response
 }
 
 async fn execute_update(
@@ -260,6 +403,88 @@ fn api_error(status: StatusCode, message: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+async fn not_found(
+    State(state): State<Arc<ApiState>>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    method: Method,
+    uri: Uri,
+) -> Response {
+    let started = Instant::now();
+    let response = api_error(StatusCode::NOT_FOUND, "Route not found.");
+    log_response(
+        &state,
+        remote_addr,
+        &method,
+        &uri,
+        &response,
+        started,
+        None,
+        "Route not found.",
+    );
+    response
+}
+
+fn log_response(
+    state: &ApiState,
+    remote_addr: SocketAddr,
+    method: &Method,
+    uri: &Uri,
+    response: &Response,
+    started: Instant,
+    itemid: Option<String>,
+    message: &str,
+) {
+    log_request(
+        state,
+        remote_addr,
+        method,
+        uri,
+        response.status(),
+        started,
+        itemid,
+        message.to_string(),
+    );
+}
+
+fn log_request(
+    state: &ApiState,
+    remote_addr: SocketAddr,
+    method: &Method,
+    uri: &Uri,
+    status: StatusCode,
+    started: Instant,
+    itemid: Option<String>,
+    message: String,
+) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| millis_to_u64(duration.as_millis()))
+        .unwrap_or_default();
+
+    if let Ok(mut history) = state.request_history.lock() {
+        let id = history.back().map_or(1, |entry| entry.id.saturating_add(1));
+        history.push_back(ApiRequestLog {
+            id,
+            timestamp_ms,
+            remote_addr: Some(remote_addr.to_string()),
+            method: method.as_str().to_string(),
+            path: uri.path().to_string(),
+            status: status.as_u16(),
+            duration_ms: millis_to_u64(started.elapsed().as_millis()),
+            itemid,
+            message,
+        });
+
+        while history.len() > REQUEST_HISTORY_LIMIT {
+            history.pop_front();
+        }
+    }
+}
+
+fn millis_to_u64(value: u128) -> u64 {
+    value.try_into().unwrap_or(u64::MAX)
 }
 
 fn deserialize_stringish<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -442,21 +667,24 @@ pub mod tests {
     }
 
     async fn start_test_server() -> ServerHandle {
-        start_server(ServerConfig {
-            mysql_host: "127.0.0.1".into(),
-            mysql_port: 3307,
-            mysql_database: "bugitik_test".into(),
-            mysql_username: "bugitik".into(),
-            mysql_password: "bugitik".into(),
-            bind_host: "127.0.0.1".into(),
-            server_port: 0,
-            api_token: TEST_TOKEN.into(),
-            table_name: "prices".into(),
-            item_id_column: "itemid".into(),
-            price_column: "price".into(),
-            denomination_column: "denomination".into(),
-            item_id_type: ItemIdType::String,
-        })
+        start_server(
+            ServerConfig {
+                mysql_host: "127.0.0.1".into(),
+                mysql_port: 3307,
+                mysql_database: "bugitik_test".into(),
+                mysql_username: "bugitik".into(),
+                mysql_password: "bugitik".into(),
+                bind_host: "127.0.0.1".into(),
+                server_port: 0,
+                api_token: TEST_TOKEN.into(),
+                table_name: "prices".into(),
+                item_id_column: "itemid".into(),
+                price_column: "price".into(),
+                denomination_column: "denomination".into(),
+                item_id_type: ItemIdType::String,
+            },
+            Arc::new(Mutex::new(VecDeque::new())),
+        )
         .await
         .expect("start test server")
     }

@@ -26,6 +26,25 @@ type ServerStatus = {
   lastError: string | null;
 };
 
+type ApiRequestLog = {
+  id: number;
+  timestampMs: number;
+  remoteAddr: string | null;
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+  itemid: string | null;
+  message: string;
+};
+
+type RequestMetrics = {
+  total: number;
+  ok: number;
+  errors: number;
+  avgDurationMs: number;
+};
+
 const updateEndpointPath = "/api/items";
 
 const defaultConfig: ServerConfig = {
@@ -50,27 +69,52 @@ const defaultStatus: ServerStatus = {
   lastError: null,
 };
 
+const defaultMetrics: RequestMetrics = {
+  total: 0,
+  ok: 0,
+  errors: 0,
+  avgDurationMs: 0,
+};
+
 function App() {
   const [config, setConfig] = useState<ServerConfig>(defaultConfig);
   const [status, setStatus] = useState<ServerStatus>(defaultStatus);
+  const [machineIp, setMachineIp] = useState<string | null>(null);
+  const [history, setHistory] = useState<ApiRequestLog[]>([]);
+  const [metrics, setMetrics] = useState<RequestMetrics>(defaultMetrics);
   const [message, setMessage] = useState("Load settings to begin.");
   const [busy, setBusy] = useState(false);
 
   const endpoint = useMemo(() => {
+    const bindHost = config.bindHost.trim();
     const host =
-      config.bindHost === "0.0.0.0" || config.bindHost.trim() === ""
-        ? "[machine-ip]"
-        : config.bindHost;
+      bindHost === "0.0.0.0" || bindHost === ""
+        ? machineIp ?? "localhost"
+        : bindHost;
     return `http://${host}:${config.serverPort || 0}${updateEndpointPath}`;
-  }, [config.bindHost, config.serverPort]);
+  }, [config.bindHost, config.serverPort, machineIp]);
 
   useEffect(() => {
     async function load() {
       try {
-        const saved = await invoke<ServerConfig>("load_settings");
-        const currentStatus = await invoke<ServerStatus>("server_status");
+        const [
+          saved,
+          currentStatus,
+          currentMachineIp,
+          currentHistory,
+          currentMetrics,
+        ] = await Promise.all([
+          invoke<ServerConfig>("load_settings"),
+          invoke<ServerStatus>("server_status"),
+          invoke<string | null>("machine_ip"),
+          invoke<ApiRequestLog[]>("request_history"),
+          invoke<RequestMetrics>("request_metrics"),
+        ]);
         setConfig({ ...defaultConfig, ...saved });
         setStatus(currentStatus);
+        setMachineIp(currentMachineIp);
+        setHistory(currentHistory);
+        setMetrics(currentMetrics);
         setMessage("Settings loaded.");
       } catch (error) {
         setMessage(formatError(error));
@@ -78,6 +122,36 @@ function App() {
     }
 
     load();
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function refreshTelemetry() {
+      try {
+        const [currentStatus, currentHistory, currentMetrics] = await Promise.all([
+          invoke<ServerStatus>("server_status"),
+          invoke<ApiRequestLog[]>("request_history"),
+          invoke<RequestMetrics>("request_metrics"),
+        ]);
+        if (!mounted) {
+          return;
+        }
+        setStatus(currentStatus);
+        setHistory(currentHistory);
+        setMetrics(currentMetrics);
+      } catch (error) {
+        if (mounted) {
+          setMessage(formatError(error));
+        }
+      }
+    }
+
+    const interval = window.setInterval(refreshTelemetry, 1000);
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
   }, []);
 
   function updateField<K extends keyof ServerConfig>(
@@ -132,13 +206,26 @@ function App() {
     }
   }
 
+  async function clearHistory() {
+    try {
+      await invoke("clear_request_history");
+      setHistory([]);
+      setMetrics(defaultMetrics);
+      setMessage("Request history cleared.");
+    } catch (error) {
+      setMessage(formatError(error));
+    }
+  }
+
   return (
     <main className="shell">
       <header className="topbar">
-        <img src="/tauri.svg" alt="" className="app-mark" />
         <div>
-          <p className="eyebrow">BugItik local API</p>
-          <h1>Data update server</h1>
+          <p className="eyebrow">Pricer API</p>
+          <h1>Connection console</h1>
+          <p className="lede">
+            Watch requests land, tune the MySQL mapper, and keep the local API ready for traffic.
+          </p>
         </div>
         <div className={status.running ? "status running" : "status stopped"}>
           {status.running ? "Running" : "Stopped"}
@@ -151,6 +238,70 @@ function App() {
           <code>{endpoint}</code>
         </div>
         <p>{message}</p>
+      </section>
+
+      <section className="metrics" aria-label="Request metrics">
+        <article>
+          <span>Total hits</span>
+          <strong>{metrics.total}</strong>
+        </article>
+        <article>
+          <span>Successful</span>
+          <strong>{metrics.ok}</strong>
+        </article>
+        <article>
+          <span>Errors</span>
+          <strong>{metrics.errors}</strong>
+        </article>
+        <article>
+          <span>Avg time</span>
+          <strong>{metrics.avgDurationMs} ms</strong>
+        </article>
+      </section>
+
+      <section className="traffic">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">Live traffic</p>
+            <h2>Connection history</h2>
+          </div>
+          <button type="button" className="secondary compact" onClick={clearHistory}>
+            Clear history
+          </button>
+        </div>
+        {history.length === 0 ? (
+          <div className="empty-state">
+            Start the server and incoming API hits will appear here.
+          </div>
+        ) : (
+          <div className="history-list" role="list">
+            {history.map((entry) => (
+              <article className="history-row" key={entry.id} role="listitem">
+                <div className="history-main">
+                  <span className={entry.status < 400 ? "code ok" : "code error"}>
+                    {entry.status}
+                  </span>
+                  <div>
+                    <strong>
+                      {entry.method} {entry.path}
+                    </strong>
+                    <p>
+                      {entry.message}
+                      {entry.itemid ? ` - item ${entry.itemid}` : ""}
+                    </p>
+                  </div>
+                </div>
+                <div className="history-meta">
+                  <span>{entry.durationMs} ms</span>
+                  <span>{entry.remoteAddr ?? "unknown client"}</span>
+                  <time dateTime={new Date(Number(entry.timestampMs)).toISOString()}>
+                    {formatTimestamp(entry.timestampMs)}
+                  </time>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </section>
 
       <form
@@ -342,6 +493,14 @@ function App() {
 
 function formatError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatTimestamp(timestampMs: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(Number(timestampMs)));
 }
 
 export default App;

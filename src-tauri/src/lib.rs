@@ -3,12 +3,14 @@ pub mod server;
 #[cfg(feature = "desktop")]
 use serde::Serialize;
 #[cfg(feature = "desktop")]
-use server::{start_server, ServerConfig, ServerHandle};
+use server::{start_server, ApiRequestLog, RequestHistory, ServerConfig, ServerHandle};
 #[cfg(feature = "desktop")]
 use std::{
+    collections::VecDeque,
     fs,
+    net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::PathBuf,
-    sync::{Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, State};
@@ -20,6 +22,7 @@ use window_vibrancy::apply_acrylic;
 struct ManagedState {
     server: Mutex<Option<ServerHandle>>,
     last_error: Mutex<Option<String>>,
+    request_history: RequestHistory,
 }
 
 #[cfg(feature = "desktop")]
@@ -29,6 +32,16 @@ struct ServerStatus {
     running: bool,
     bind_address: Option<String>,
     last_error: Option<String>,
+}
+
+#[cfg(feature = "desktop")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestMetrics {
+    total: usize,
+    ok: usize,
+    errors: usize,
+    avg_duration_ms: u64,
 }
 
 #[cfg(feature = "desktop")]
@@ -81,7 +94,7 @@ async fn start_api_server_internal(
         *current = None;
     }
 
-    match start_server(config).await {
+    match start_server(config, state.request_history.clone()).await {
         Ok(handle) => {
             {
                 let mut last_error = lock(&state.last_error)?;
@@ -144,6 +157,63 @@ fn server_status(state: State<'_, ManagedState>) -> Result<ServerStatus, String>
 }
 
 #[cfg(feature = "desktop")]
+#[tauri::command]
+fn request_history(state: State<'_, ManagedState>) -> Result<Vec<ApiRequestLog>, String> {
+    Ok(lock(&state.request_history)?
+        .iter()
+        .rev()
+        .take(100)
+        .cloned()
+        .collect())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn clear_request_history(state: State<'_, ManagedState>) -> Result<(), String> {
+    lock(&state.request_history)?.clear();
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn request_metrics(state: State<'_, ManagedState>) -> Result<RequestMetrics, String> {
+    let history = lock(&state.request_history)?;
+    let total = history.len();
+    let ok = history
+        .iter()
+        .filter(|entry| (200..400).contains(&entry.status))
+        .count();
+    let errors = total.saturating_sub(ok);
+    let duration_sum: u64 = history.iter().map(|entry| entry.duration_ms).sum();
+    let avg_duration_ms = if total == 0 {
+        0
+    } else {
+        duration_sum / total as u64
+    };
+
+    Ok(RequestMetrics {
+        total,
+        ok,
+        errors,
+        avg_duration_ms,
+    })
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn machine_ip() -> Option<String> {
+    let socket = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).ok()?;
+    socket.connect(SocketAddr::from(([8, 8, 8, 8], 80))).ok()?;
+
+    match socket.local_addr().ok()?.ip() {
+        IpAddr::V4(address) if !address.is_unspecified() && !address.is_loopback() => {
+            Some(address.to_string())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "desktop")]
 fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
@@ -163,13 +233,21 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(ManagedState::default())
+        .manage(ManagedState {
+            server: Mutex::new(None),
+            last_error: Mutex::new(None),
+            request_history: Arc::new(Mutex::new(VecDeque::new())),
+        })
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
             start_api_server,
             stop_api_server,
-            server_status
+            server_status,
+            request_history,
+            clear_request_history,
+            request_metrics,
+            machine_ip
         ])
         .setup(|app| {
             #[cfg(target_os = "windows")]
@@ -197,8 +275,8 @@ pub fn run() {
                             && !config.api_token.trim().is_empty()
                             && !config.table_name.trim().is_empty()
                         {
-                            // Try to start the server (silently ignore errors)
-                            let _ = start_server(config).await;
+                            let state = app_handle.state::<ManagedState>();
+                            let _ = start_api_server_internal(&*state, config, false, None).await;
                         }
                     }
                 });
