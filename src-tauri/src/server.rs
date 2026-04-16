@@ -14,6 +14,7 @@ use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 use tokio::sync::oneshot;
 
 const TOKEN_HEADER: &str = "x-api-token";
+const UPDATE_ITEM_PATH: &str = "/api/items";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,7 +114,7 @@ pub async fn start_server(config: ServerConfig) -> Result<ServerHandle, String> 
     let pool = create_pool(&config).await?;
     let state = ApiState { config, pool };
     let router = Router::new()
-        .route("/api.php", post(update_item))
+        .route(UPDATE_ITEM_PATH, post(update_item))
         .route("/health", get(health))
         .with_state(Arc::new(state));
 
@@ -141,7 +142,7 @@ pub async fn start_server(config: ServerConfig) -> Result<ServerHandle, String> 
     })
 }
 
-async fn create_pool(config: &ServerConfig) -> Result<MySqlPool, String> {
+pub async fn create_pool(config: &ServerConfig) -> Result<MySqlPool, String> {
     let options = MySqlConnectOptions::new()
         .host(&config.mysql_host)
         .port(config.mysql_port)
@@ -328,7 +329,10 @@ pub mod tests {
         let mut server = start_test_server().await;
         let client = Client::new();
         let response = client
-            .post(format!("http://{}/api.php", server.bind_address))
+            .post(format!(
+                "http://{}{}",
+                server.bind_address, UPDATE_ITEM_PATH
+            ))
             .header("X-API-Token", TEST_TOKEN)
             .json(&serde_json::json!({
                 "itemid": itemid,
@@ -362,7 +366,10 @@ pub mod tests {
         let mut server = start_test_server().await;
         let client = Client::new();
         let response = client
-            .post(format!("http://{}/api.php", server.bind_address))
+            .post(format!(
+                "http://{}{}",
+                server.bind_address, UPDATE_ITEM_PATH
+            ))
             .json(&serde_json::json!({
                 "itemid": "missing-token",
                 "price": "1.00",
@@ -387,7 +394,10 @@ pub mod tests {
         let mut server = start_test_server().await;
         let client = Client::new();
         let response = client
-            .post(format!("http://{}/api.php", server.bind_address))
+            .post(format!(
+                "http://{}{}",
+                server.bind_address, UPDATE_ITEM_PATH
+            ))
             .header("X-API-Token", TEST_TOKEN)
             .json(&serde_json::json!({
                 "itemid": "bad-payload",
@@ -410,7 +420,10 @@ pub mod tests {
         let mut server = start_test_server().await;
         let client = Client::new();
         let response = client
-            .post(format!("http://{}/api.php", server.bind_address))
+            .post(format!(
+                "http://{}{}",
+                server.bind_address, UPDATE_ITEM_PATH
+            ))
             .header("X-API-Token", TEST_TOKEN)
             .json(&serde_json::json!({
                 "itemid": unique_itemid("missing"),

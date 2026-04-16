@@ -26,6 +26,8 @@ type ServerStatus = {
   lastError: string | null;
 };
 
+const updateEndpointPath = "/api/items";
+
 const defaultConfig: ServerConfig = {
   mysqlHost: "127.0.0.1",
   mysqlPort: 3306,
@@ -59,7 +61,7 @@ function App() {
       config.bindHost === "0.0.0.0" || config.bindHost.trim() === ""
         ? "[machine-ip]"
         : config.bindHost;
-    return `http://${host}:${config.serverPort || 0}/api.php`;
+    return `http://${host}:${config.serverPort || 0}${updateEndpointPath}`;
   }, [config.bindHost, config.serverPort]);
 
   useEffect(() => {

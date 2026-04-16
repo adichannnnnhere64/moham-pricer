@@ -12,6 +12,8 @@ use std::{
 };
 #[cfg(feature = "desktop")]
 use tauri::{AppHandle, Manager, State};
+#[cfg(all(feature = "desktop", target_os = "windows"))]
+use window_vibrancy::apply_acrylic;
 
 #[cfg(feature = "desktop")]
 #[derive(Default)]
@@ -59,13 +61,17 @@ fn save_settings(app: AppHandle, config: ServerConfig) -> Result<(), String> {
 }
 
 #[cfg(feature = "desktop")]
-#[tauri::command]
-async fn start_api_server(
-    app: AppHandle,
-    state: State<'_, ManagedState>,
+async fn start_api_server_internal(
+    state: &ManagedState,
     config: ServerConfig,
+    save: bool,
+    app: Option<AppHandle>,
 ) -> Result<ServerStatus, String> {
-    save_settings(app, config.clone())?;
+    if save {
+        if let Some(handle) = app {
+            save_settings(handle, config.clone())?;
+        }
+    }
 
     {
         let mut current = lock(&state.server)?;
@@ -98,6 +104,16 @@ async fn start_api_server(
             Err(error)
         }
     }
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn start_api_server(
+    app: AppHandle,
+    state: State<'_, ManagedState>,
+    config: ServerConfig,
+) -> Result<ServerStatus, String> {
+    start_api_server_internal(&*state, config, true, Some(app)).await
 }
 
 #[cfg(feature = "desktop")]
@@ -155,6 +171,41 @@ pub fn run() {
             stop_api_server,
             server_status
         ])
+        .setup(|app| {
+            #[cfg(target_os = "windows")]
+            {
+                let window = app.get_webview_window("main").unwrap();
+                if let Err(error) = apply_acrylic(&window, Some((18, 18, 18, 125))) {
+                    eprintln!("Unable to apply acrylic window effect: {error}");
+                }
+            }
+
+            // Auto-start server if settings exist and are valid
+            #[cfg(feature = "desktop")]
+            {
+                let app_handle = app.handle().clone();
+
+                tauri::async_runtime::spawn(async move {
+                    // Small delay to let UI initialize first
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                    if let Ok(config) = load_settings(app_handle.clone()) {
+                        // Only auto-start if config has database configured (not empty)
+                        if !config.mysql_host.trim().is_empty()
+                            && !config.mysql_database.trim().is_empty()
+                            && !config.mysql_username.trim().is_empty()
+                            && !config.api_token.trim().is_empty()
+                            && !config.table_name.trim().is_empty()
+                        {
+                            // Try to start the server (silently ignore errors)
+                            let _ = start_server(config).await;
+                        }
+                    }
+                });
+            }
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
