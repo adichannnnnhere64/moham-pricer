@@ -8,7 +8,7 @@ use axum::{
 };
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
 use sqlx::{
-    mysql::{MySqlConnectOptions, MySqlPoolOptions},
+    mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
     MySqlPool,
 };
 use std::{
@@ -185,7 +185,8 @@ pub async fn create_pool(config: &ServerConfig) -> Result<MySqlPool, String> {
         .port(config.mysql_port)
         .database(&config.mysql_database)
         .username(&config.mysql_username)
-        .password(&config.mysql_password);
+        .password(&config.mysql_password)
+        .ssl_mode(MySqlSslMode::Disabled);
 
     MySqlPoolOptions::new()
         .max_connections(64)
