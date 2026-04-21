@@ -135,7 +135,11 @@ pub async fn start_server(
 ) -> Result<ServerHandle, String> {
     validate_config(&config)?;
 
-    let bind_address = format!("{}:{}", config.bind_host, config.server_port);
+    let normalized_host = match config.bind_host.trim() {
+        "localhost" => "127.0.0.1",
+        h => h,
+    };
+    let bind_address = format!("{}:{}", normalized_host, config.server_port);
     let socket_addr = SocketAddr::from_str(&bind_address)
         .map_err(|error| format!("Invalid bind address {bind_address}: {error}"))?;
 
