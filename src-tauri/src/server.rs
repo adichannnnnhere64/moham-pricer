@@ -6,7 +6,7 @@ use axum::{
     routing::any,
     Json, Router,
 };
-use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::{
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
     MySqlPool,
@@ -69,14 +69,54 @@ pub enum ItemIdType {
     String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct UpdatePayload {
-    #[serde(deserialize_with = "deserialize_stringish")]
     pub itemid: String,
-    #[serde(deserialize_with = "deserialize_stringish")]
     pub price: String,
-    #[serde(default, deserialize_with = "deserialize_optional_stringish")]
     pub denomination: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for UpdatePayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error as DeError;
+        let map = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+        let normalized: serde_json::Map<String, serde_json::Value> =
+            map.into_iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
+
+        fn extract_string<E: DeError>(
+            map: &serde_json::Map<String, serde_json::Value>,
+            field: &'static str,
+        ) -> Result<String, E> {
+            match map.get(field) {
+                Some(serde_json::Value::String(s)) => Ok(s.clone()),
+                Some(serde_json::Value::Number(n)) => Ok(n.to_string()),
+                Some(_) => Err(E::custom(format!("expected string or number for {field}"))),
+                None => Err(E::missing_field(field)),
+            }
+        }
+
+        let itemid = extract_string::<D::Error>(&normalized, "itemid")?;
+        let price = extract_string::<D::Error>(&normalized, "price")?;
+        let denomination = match normalized.get("denomination") {
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+            Some(serde_json::Value::Null) | None => None,
+            Some(_) => {
+                return Err(D::Error::custom(
+                    "expected string or number for denomination",
+                ))
+            }
+        };
+
+        Ok(UpdatePayload {
+            itemid,
+            price,
+            denomination,
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -506,30 +546,6 @@ fn millis_to_u64(value: u128) -> u64 {
     value.try_into().unwrap_or(u64::MAX)
 }
 
-fn deserialize_stringish<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::String(value) => Ok(value),
-        serde_json::Value::Number(value) => Ok(value.to_string()),
-        _ => Err(D::Error::custom("expected a string or number")),
-    }
-}
-
-fn deserialize_optional_stringish<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(s) => Ok(Some(s)),
-        serde_json::Value::Number(n) => Ok(Some(n.to_string())),
-        _ => Err(D::Error::custom("expected a string, number, or null")),
-    }
-}
 
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
     if config.mysql_host.trim().is_empty()
