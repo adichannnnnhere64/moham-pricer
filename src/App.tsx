@@ -484,7 +484,7 @@ function App() {
         <pre>{`curl -X POST ${endpoint} \\
   -H "Content-Type: application/json" \\
   -H "X-API-Token: ${config.apiToken ? "<token>" : "your-token"}" \\
-  -d '{"itemid":"101","price":"250.00","denomination":"Credits"}'`}</pre>
+  -d '{"itemid":"101","price":"250.00"}'`}</pre>
         {status.lastError ? <p className="error">{status.lastError}</p> : null}
       </section>
     </main>

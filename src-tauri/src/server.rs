@@ -75,8 +75,8 @@ pub struct UpdatePayload {
     pub itemid: String,
     #[serde(deserialize_with = "deserialize_stringish")]
     pub price: String,
-    #[serde(deserialize_with = "deserialize_stringish")]
-    pub denomination: String,
+    #[serde(default, deserialize_with = "deserialize_optional_stringish")]
+    pub denomination: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -271,7 +271,7 @@ async fn update_item(
     let Ok(Json(payload)) = payload else {
         let response = api_error(
             StatusCode::BAD_REQUEST,
-            "Invalid input. Fields required: itemid, price, denomination.",
+            "Invalid input. Fields required: itemid, price.",
         );
         log_response(
             &state,
@@ -281,19 +281,16 @@ async fn update_item(
             &response,
             started,
             None,
-            "Invalid input. Fields required: itemid, price, denomination.",
+            "Invalid input. Fields required: itemid, price.",
         );
         return response;
     };
 
     let itemid = Some(payload.itemid.clone());
-    if payload.itemid.trim().is_empty()
-        || payload.price.trim().is_empty()
-        || payload.denomination.trim().is_empty()
-    {
+    if payload.itemid.trim().is_empty() || payload.price.trim().is_empty() {
         let response = api_error(
             StatusCode::BAD_REQUEST,
-            "Invalid input. Fields required: itemid, price, denomination.",
+            "Invalid input. Fields required: itemid, price.",
         );
         log_response(
             &state,
@@ -303,7 +300,7 @@ async fn update_item(
             &response,
             started,
             itemid,
-            "Invalid input. Fields required: itemid, price, denomination.",
+            "Invalid input. Fields required: itemid, price.",
         );
         return response;
     }
@@ -366,14 +363,31 @@ async fn execute_update(
     pool: &MySqlPool,
     payload: &UpdatePayload,
 ) -> Result<u64, String> {
-    let sql = format!(
-        "UPDATE `{}` SET `{}` = ?, `{}` = ? WHERE `{}` = ?",
-        config.table_name, config.price_column, config.denomination_column, config.item_id_column
-    );
+    let use_denomination = !config.denomination_column.trim().is_empty()
+        && payload.denomination.is_some();
 
-    let query = sqlx::query(&sql)
-        .bind(payload.price.trim())
-        .bind(payload.denomination.trim());
+    let sql = if use_denomination {
+        format!(
+            "UPDATE `{}` SET `{}` = ?, `{}` = ? WHERE `{}` = ?",
+            config.table_name,
+            config.price_column,
+            config.denomination_column,
+            config.item_id_column,
+        )
+    } else {
+        format!(
+            "UPDATE `{}` SET `{}` = ? WHERE `{}` = ?",
+            config.table_name, config.price_column, config.item_id_column,
+        )
+    };
+
+    let query = if use_denomination {
+        sqlx::query(&sql)
+            .bind(payload.price.trim())
+            .bind(payload.denomination.as_deref().unwrap_or("").trim())
+    } else {
+        sqlx::query(&sql).bind(payload.price.trim())
+    };
 
     let result = match config.item_id_type {
         ItemIdType::Integer => {
@@ -504,6 +518,19 @@ where
     }
 }
 
+fn deserialize_optional_stringish<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => Ok(Some(s)),
+        serde_json::Value::Number(n) => Ok(Some(n.to_string())),
+        _ => Err(D::Error::custom("expected a string, number, or null")),
+    }
+}
+
 pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
     if config.mysql_host.trim().is_empty()
         || config.mysql_database.trim().is_empty()
@@ -518,13 +545,20 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
         ("table name", &config.table_name),
         ("item ID column", &config.item_id_column),
         ("price column", &config.price_column),
-        ("denomination column", &config.denomination_column),
     ] {
         if !is_safe_identifier(identifier) {
             return Err(format!(
                 "Invalid {label}. Use only letters, numbers, and underscores; do not start with a number."
             ));
         }
+    }
+
+    if !config.denomination_column.trim().is_empty()
+        && !is_safe_identifier(&config.denomination_column)
+    {
+        return Err(
+            "Invalid denomination column. Use only letters, numbers, and underscores; do not start with a number.".into()
+        );
     }
 
     Ok(())
