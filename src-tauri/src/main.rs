@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    bugitik_lib::run()
+    cloud_api_lib::run()
 }
