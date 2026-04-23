@@ -6,7 +6,7 @@ use axum::{
     routing::any,
     Json, Router,
 };
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use sqlx::{
     mysql::{MySqlConnectOptions, MySqlPoolOptions, MySqlSslMode},
     MySqlPool,
@@ -76,47 +76,81 @@ pub struct UpdatePayload {
     pub denomination: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for UpdatePayload {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error as DeError;
-        let map = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
-        let normalized: serde_json::Map<String, serde_json::Value> =
-            map.into_iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
+fn required_fields_message(config: &ServerConfig) -> String {
+    format!(
+        "Invalid input. Fields required: {}, {}.",
+        config.item_id_column.trim(),
+        config.price_column.trim(),
+    )
+}
 
-        fn extract_string<E: DeError>(
-            map: &serde_json::Map<String, serde_json::Value>,
-            field: &'static str,
-        ) -> Result<String, E> {
-            match map.get(field) {
-                Some(serde_json::Value::String(s)) => Ok(s.clone()),
-                Some(serde_json::Value::Number(n)) => Ok(n.to_string()),
-                Some(_) => Err(E::custom(format!("expected string or number for {field}"))),
-                None => Err(E::missing_field(field)),
-            }
-        }
+fn extract_payload(
+    config: &ServerConfig,
+    value: serde_json::Value,
+) -> Result<UpdatePayload, String> {
+    let serde_json::Value::Object(map) = value else {
+        return Err(required_fields_message(config));
+    };
 
-        let itemid = extract_string::<D::Error>(&normalized, "itemid")?;
-        let price = extract_string::<D::Error>(&normalized, "price")?;
-        let denomination = match normalized.get("denomination") {
-            Some(serde_json::Value::String(s)) => Some(s.clone()),
-            Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+    let normalized: serde_json::Map<String, serde_json::Value> =
+        map.into_iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
+
+    fn extract(
+        map: &serde_json::Map<String, serde_json::Value>,
+        key: &str,
+    ) -> Option<Result<String, ()>> {
+        match map.get(key) {
+            Some(serde_json::Value::String(s)) => Some(Ok(s.clone())),
+            Some(serde_json::Value::Number(n)) => Some(Ok(n.to_string())),
             Some(serde_json::Value::Null) | None => None,
-            Some(_) => {
-                return Err(D::Error::custom(
-                    "expected string or number for denomination",
+            Some(_) => Some(Err(())),
+        }
+    }
+
+    let id_key = config.item_id_column.trim().to_lowercase();
+    let price_key = config.price_column.trim().to_lowercase();
+
+    let itemid = match extract(&normalized, &id_key) {
+        Some(Ok(s)) => s,
+        Some(Err(())) => {
+            return Err(format!(
+                "Invalid input. {} must be a string or number.",
+                config.item_id_column.trim()
+            ))
+        }
+        None => return Err(required_fields_message(config)),
+    };
+    let price = match extract(&normalized, &price_key) {
+        Some(Ok(s)) => s,
+        Some(Err(())) => {
+            return Err(format!(
+                "Invalid input. {} must be a string or number.",
+                config.price_column.trim()
+            ))
+        }
+        None => return Err(required_fields_message(config)),
+    };
+
+    let denom_col = config.denomination_column.trim();
+    let denomination = if denom_col.is_empty() {
+        None
+    } else {
+        match extract(&normalized, &denom_col.to_lowercase()) {
+            Some(Ok(s)) => Some(s),
+            Some(Err(())) => {
+                return Err(format!(
+                    "Invalid input. {denom_col} must be a string or number."
                 ))
             }
-        };
+            None => None,
+        }
+    };
 
-        Ok(UpdatePayload {
-            itemid,
-            price,
-            denomination,
-        })
-    }
+    Ok(UpdatePayload {
+        itemid,
+        price,
+        denomination,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -274,7 +308,7 @@ async fn update_item(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    payload: Result<Json<UpdatePayload>, JsonRejection>,
+    payload: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Response {
     let started = Instant::now();
 
@@ -308,30 +342,47 @@ async fn update_item(
         return response;
     }
 
-    let Ok(Json(payload)) = payload else {
-        let response = api_error(
-            StatusCode::BAD_REQUEST,
-            "Invalid input. Fields required: itemid, price.",
-        );
-        log_response(
-            &state,
-            remote_addr,
-            &method,
-            &uri,
-            &response,
-            started,
-            None,
-            "Invalid input. Fields required: itemid, price.",
-        );
-        return response;
+    let raw = match payload {
+        Ok(Json(v)) => v,
+        Err(_) => {
+            let message = required_fields_message(&state.config);
+            let response = api_error(StatusCode::BAD_REQUEST, &message);
+            log_response(
+                &state,
+                remote_addr,
+                &method,
+                &uri,
+                &response,
+                started,
+                None,
+                &message,
+            );
+            return response;
+        }
+    };
+
+    let payload = match extract_payload(&state.config, raw) {
+        Ok(p) => p,
+        Err(message) => {
+            let response = api_error(StatusCode::BAD_REQUEST, &message);
+            log_response(
+                &state,
+                remote_addr,
+                &method,
+                &uri,
+                &response,
+                started,
+                None,
+                &message,
+            );
+            return response;
+        }
     };
 
     let itemid = Some(payload.itemid.clone());
     if payload.itemid.trim().is_empty() || payload.price.trim().is_empty() {
-        let response = api_error(
-            StatusCode::BAD_REQUEST,
-            "Invalid input. Fields required: itemid, price.",
-        );
+        let message = required_fields_message(&state.config);
+        let response = api_error(StatusCode::BAD_REQUEST, &message);
         log_response(
             &state,
             remote_addr,
@@ -340,16 +391,17 @@ async fn update_item(
             &response,
             started,
             itemid,
-            "Invalid input. Fields required: itemid, price.",
+            &message,
         );
         return response;
     }
 
     if payload.price.parse::<f64>().is_err() {
-        let response = api_error(
-            StatusCode::BAD_REQUEST,
-            "Invalid input. price must be numeric.",
+        let message = format!(
+            "Invalid input. {} must be numeric.",
+            state.config.price_column.trim()
         );
+        let response = api_error(StatusCode::BAD_REQUEST, &message);
         log_response(
             &state,
             remote_addr,
@@ -358,13 +410,19 @@ async fn update_item(
             &response,
             started,
             itemid,
-            "Invalid input. price must be numeric.",
+            &message,
         );
         return response;
     }
 
     let response = match execute_update(&state.config, &state.pool, &payload).await {
-        Ok(0) => api_error(StatusCode::NOT_FOUND, "No matching itemid was found."),
+        Ok(0) => api_error(
+            StatusCode::NOT_FOUND,
+            &format!(
+                "No matching {} was found.",
+                state.config.item_id_column.trim()
+            ),
+        ),
         Ok(_) => (
             StatusCode::OK,
             Json(SuccessResponse {
@@ -435,7 +493,12 @@ async fn execute_update(
                 .itemid
                 .trim()
                 .parse::<i64>()
-                .map_err(|_| "Invalid input. itemid must be an integer.".to_string())?;
+                .map_err(|_| {
+                    format!(
+                        "Invalid input. {} must be an integer.",
+                        config.item_id_column.trim()
+                    )
+                })?;
             query.bind(item_id).execute(pool).await
         }
         ItemIdType::String => query.bind(payload.itemid.trim()).execute(pool).await,
