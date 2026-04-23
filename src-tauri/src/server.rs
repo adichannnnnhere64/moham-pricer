@@ -36,10 +36,8 @@ pub struct ServerConfig {
     pub server_port: u16,
     pub api_token: String,
     pub table_name: String,
-    pub item_id_column: String,
-    pub price_column: String,
-    pub denomination_column: String,
-    pub item_id_type: ItemIdType,
+    #[serde(default)]
+    pub fields: Vec<ColumnField>,
 }
 
 impl Default for ServerConfig {
@@ -54,34 +52,68 @@ impl Default for ServerConfig {
             server_port: 8045,
             api_token: String::new(),
             table_name: String::new(),
-            item_id_column: "itemid".into(),
-            price_column: "price".into(),
-            denomination_column: "denomination".into(),
-            item_id_type: ItemIdType::String,
+            fields: vec![
+                ColumnField {
+                    name: "itemid".into(),
+                    field_type: FieldType::String,
+                    is_key: true,
+                },
+                ColumnField {
+                    name: "price".into(),
+                    field_type: FieldType::Float,
+                    is_key: false,
+                },
+            ],
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnField {
+    pub name: String,
+    #[serde(default)]
+    pub field_type: FieldType,
+    #[serde(default)]
+    pub is_key: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum ItemIdType {
-    Integer,
+pub enum FieldType {
+    #[default]
     String,
+    Integer,
+    Float,
+}
+
+#[derive(Debug, Clone)]
+pub enum BoundValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdatePayload {
-    pub itemid: String,
-    pub price: String,
-    pub denomination: Option<String>,
+    #[serde(flatten)]
+    pub values: serde_json::Map<String, serde_json::Value>,
+    #[serde(skip)]
+    pub key_column: String,
+    #[serde(skip)]
+    pub key_value_display: String,
+    #[serde(skip)]
+    pub bound: Vec<(String, BoundValue)>,
 }
 
-fn required_fields_message(config: &ServerConfig) -> String {
-    format!(
-        "Invalid input. Fields required: {}, {}.",
-        config.item_id_column.trim(),
-        config.price_column.trim(),
-    )
+fn required_key_message(config: &ServerConfig) -> String {
+    let key = config
+        .fields
+        .iter()
+        .find(|f| f.is_key)
+        .map(|f| f.name.trim())
+        .unwrap_or("key");
+    format!("Invalid input. Required field {key} missing.")
 }
 
 fn extract_payload(
@@ -89,68 +121,118 @@ fn extract_payload(
     value: serde_json::Value,
 ) -> Result<UpdatePayload, String> {
     let serde_json::Value::Object(map) = value else {
-        return Err(required_fields_message(config));
+        return Err("Invalid input. Expected a JSON object.".into());
     };
 
     let normalized: serde_json::Map<String, serde_json::Value> =
         map.into_iter().map(|(k, v)| (k.to_lowercase(), v)).collect();
 
-    fn extract(
-        map: &serde_json::Map<String, serde_json::Value>,
-        key: &str,
-    ) -> Option<Result<String, ()>> {
-        match map.get(key) {
-            Some(serde_json::Value::String(s)) => Some(Ok(s.clone())),
-            Some(serde_json::Value::Number(n)) => Some(Ok(n.to_string())),
-            Some(serde_json::Value::Null) | None => None,
-            Some(_) => Some(Err(())),
+    let key_field = config
+        .fields
+        .iter()
+        .find(|f| f.is_key)
+        .ok_or_else(|| "Server misconfigured: no key field defined.".to_string())?;
+
+    let mut values = serde_json::Map::new();
+    let mut bound: Vec<(String, BoundValue)> = Vec::new();
+    let mut key_value_display = String::new();
+
+    for field in &config.fields {
+        let raw = normalized.get(&field.name.trim().to_lowercase());
+        let present = !matches!(raw, None | Some(serde_json::Value::Null));
+
+        if field.is_key {
+            if !present {
+                return Err(format!(
+                    "Invalid input. Required field {} missing.",
+                    field.name.trim()
+                ));
+            }
+            let (bv, display, echo) = coerce_value(field, raw.unwrap())?;
+            key_value_display = display;
+            values.insert(field.name.trim().to_string(), echo);
+            bound.push((field.name.trim().to_string(), bv));
+        } else if present {
+            let (bv, _display, echo) = coerce_value(field, raw.unwrap())?;
+            values.insert(field.name.trim().to_string(), echo);
+            bound.push((field.name.trim().to_string(), bv));
         }
     }
 
-    let id_key = config.item_id_column.trim().to_lowercase();
-    let price_key = config.price_column.trim().to_lowercase();
-
-    let itemid = match extract(&normalized, &id_key) {
-        Some(Ok(s)) => s,
-        Some(Err(())) => {
-            return Err(format!(
-                "Invalid input. {} must be a string or number.",
-                config.item_id_column.trim()
-            ))
-        }
-        None => return Err(required_fields_message(config)),
-    };
-    let price = match extract(&normalized, &price_key) {
-        Some(Ok(s)) => s,
-        Some(Err(())) => {
-            return Err(format!(
-                "Invalid input. {} must be a string or number.",
-                config.price_column.trim()
-            ))
-        }
-        None => return Err(required_fields_message(config)),
-    };
-
-    let denom_col = config.denomination_column.trim();
-    let denomination = if denom_col.is_empty() {
-        None
-    } else {
-        match extract(&normalized, &denom_col.to_lowercase()) {
-            Some(Ok(s)) => Some(s),
-            Some(Err(())) => {
-                return Err(format!(
-                    "Invalid input. {denom_col} must be a string or number."
-                ))
-            }
-            None => None,
-        }
-    };
-
     Ok(UpdatePayload {
-        itemid,
-        price,
-        denomination,
+        values,
+        key_column: key_field.name.trim().to_string(),
+        key_value_display,
+        bound,
     })
+}
+
+fn coerce_value(
+    field: &ColumnField,
+    value: &serde_json::Value,
+) -> Result<(BoundValue, String, serde_json::Value), String> {
+    let name = field.name.trim();
+    match field.field_type {
+        FieldType::String => {
+            let s = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => {
+                    return Err(format!(
+                        "Invalid input. {name} must be a string or number."
+                    ))
+                }
+            };
+            let s = s.trim().to_string();
+            if s.is_empty() {
+                return Err(format!("Invalid input. {name} must not be empty."));
+            }
+            Ok((
+                BoundValue::String(s.clone()),
+                s.clone(),
+                serde_json::Value::String(s),
+            ))
+        }
+        FieldType::Integer => {
+            let parsed: i64 = match value {
+                serde_json::Value::Number(n) => n
+                    .as_i64()
+                    .ok_or_else(|| format!("Invalid input. {name} must be an integer."))?,
+                serde_json::Value::String(s) => s
+                    .trim()
+                    .parse::<i64>()
+                    .map_err(|_| format!("Invalid input. {name} must be an integer."))?,
+                _ => return Err(format!("Invalid input. {name} must be an integer.")),
+            };
+            Ok((
+                BoundValue::Integer(parsed),
+                parsed.to_string(),
+                serde_json::Value::from(parsed),
+            ))
+        }
+        FieldType::Float => {
+            let parsed: f64 = match value {
+                serde_json::Value::Number(n) => n
+                    .as_f64()
+                    .ok_or_else(|| format!("Invalid input. {name} must be numeric."))?,
+                serde_json::Value::String(s) => s
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("Invalid input. {name} must be numeric."))?,
+                _ => return Err(format!("Invalid input. {name} must be numeric.")),
+            };
+            let display = match value {
+                serde_json::Value::String(s) => s.trim().to_string(),
+                _ => parsed.to_string(),
+            };
+            Ok((
+                BoundValue::Float(parsed),
+                display.clone(),
+                serde_json::Value::String(display),
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -345,7 +427,10 @@ async fn update_item(
     let raw = match payload {
         Ok(Json(v)) => v,
         Err(_) => {
-            let message = required_fields_message(&state.config);
+            let message = format!(
+                "Invalid JSON body. Send a JSON object with Content-Type: application/json. {}",
+                required_key_message(&state.config)
+            );
             let response = api_error(StatusCode::BAD_REQUEST, &message);
             log_response(
                 &state,
@@ -379,49 +464,12 @@ async fn update_item(
         }
     };
 
-    let itemid = Some(payload.itemid.clone());
-    if payload.itemid.trim().is_empty() || payload.price.trim().is_empty() {
-        let message = required_fields_message(&state.config);
-        let response = api_error(StatusCode::BAD_REQUEST, &message);
-        log_response(
-            &state,
-            remote_addr,
-            &method,
-            &uri,
-            &response,
-            started,
-            itemid,
-            &message,
-        );
-        return response;
-    }
-
-    if payload.price.parse::<f64>().is_err() {
-        let message = format!(
-            "Invalid input. {} must be numeric.",
-            state.config.price_column.trim()
-        );
-        let response = api_error(StatusCode::BAD_REQUEST, &message);
-        log_response(
-            &state,
-            remote_addr,
-            &method,
-            &uri,
-            &response,
-            started,
-            itemid,
-            &message,
-        );
-        return response;
-    }
+    let itemid = Some(payload.key_value_display.clone());
 
     let response = match execute_update(&state.config, &state.pool, &payload).await {
         Ok(0) => api_error(
             StatusCode::NOT_FOUND,
-            &format!(
-                "No matching {} was found.",
-                state.config.item_id_column.trim()
-            ),
+            &format!("No matching {} was found.", payload.key_column),
         ),
         Ok(_) => (
             StatusCode::OK,
@@ -461,52 +509,56 @@ async fn execute_update(
     pool: &MySqlPool,
     payload: &UpdatePayload,
 ) -> Result<u64, String> {
-    let use_denomination = !config.denomination_column.trim().is_empty()
-        && payload.denomination.is_some();
+    let set_items: Vec<&(String, BoundValue)> = payload
+        .bound
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case(&payload.key_column))
+        .collect();
 
-    let sql = if use_denomination {
-        format!(
-            "UPDATE `{}` SET `{}` = ?, `{}` = ? WHERE `{}` = ?",
-            config.table_name,
-            config.price_column,
-            config.denomination_column,
-            config.item_id_column,
-        )
-    } else {
-        format!(
-            "UPDATE `{}` SET `{}` = ? WHERE `{}` = ?",
-            config.table_name, config.price_column, config.item_id_column,
-        )
-    };
+    if set_items.is_empty() {
+        return Err("Invalid input. No updatable fields provided.".into());
+    }
 
-    let query = if use_denomination {
-        sqlx::query(&sql)
-            .bind(payload.price.trim())
-            .bind(payload.denomination.as_deref().unwrap_or("").trim())
-    } else {
-        sqlx::query(&sql).bind(payload.price.trim())
-    };
+    let set_clause = set_items
+        .iter()
+        .map(|(name, _)| format!("`{name}` = ?"))
+        .collect::<Vec<_>>()
+        .join(", ");
 
-    let result = match config.item_id_type {
-        ItemIdType::Integer => {
-            let item_id = payload
-                .itemid
-                .trim()
-                .parse::<i64>()
-                .map_err(|_| {
-                    format!(
-                        "Invalid input. {} must be an integer.",
-                        config.item_id_column.trim()
-                    )
-                })?;
-            query.bind(item_id).execute(pool).await
-        }
-        ItemIdType::String => query.bind(payload.itemid.trim()).execute(pool).await,
-    };
+    let sql = format!(
+        "UPDATE `{}` SET {} WHERE `{}` = ?",
+        config.table_name, set_clause, payload.key_column,
+    );
 
-    result
+    let mut query = sqlx::query(&sql);
+    for (_, bv) in &set_items {
+        query = bind_value(query, bv);
+    }
+
+    let key_bv = payload
+        .bound
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(&payload.key_column))
+        .map(|(_, bv)| bv)
+        .ok_or_else(|| "Server misconfigured: key value missing.".to_string())?;
+    query = bind_value(query, key_bv);
+
+    query
+        .execute(pool)
+        .await
         .map(|done| done.rows_affected())
         .map_err(|error| format!("Database update failed: {error}"))
+}
+
+fn bind_value<'q>(
+    query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    value: &'q BoundValue,
+) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
+    match value {
+        BoundValue::String(s) => query.bind(s.as_str()),
+        BoundValue::Integer(i) => query.bind(*i),
+        BoundValue::Float(f) => query.bind(*f),
+    }
 }
 
 fn token_is_valid(headers: &HeaderMap, expected: &str) -> bool {
@@ -620,24 +672,35 @@ pub fn validate_config(config: &ServerConfig) -> Result<(), String> {
         return Err("MySQL, bind host, and API token settings are required.".into());
     }
 
-    for (label, identifier) in [
-        ("table name", &config.table_name),
-        ("item ID column", &config.item_id_column),
-        ("price column", &config.price_column),
-    ] {
-        if !is_safe_identifier(identifier) {
-            return Err(format!(
-                "Invalid {label}. Use only letters, numbers, and underscores; do not start with a number."
-            ));
-        }
+    if !is_safe_identifier(&config.table_name) {
+        return Err(
+            "Invalid table name. Use only letters, numbers, and underscores; do not start with a number.".into()
+        );
     }
 
-    if !config.denomination_column.trim().is_empty()
-        && !is_safe_identifier(&config.denomination_column)
-    {
-        return Err(
-            "Invalid denomination column. Use only letters, numbers, and underscores; do not start with a number.".into()
-        );
+    if config.fields.is_empty() {
+        return Err("Define at least one field (the key field).".into());
+    }
+
+    let key_count = config.fields.iter().filter(|f| f.is_key).count();
+    if key_count == 0 {
+        return Err("One field must be marked as the key (WHERE clause).".into());
+    }
+    if key_count > 1 {
+        return Err("Only one field may be marked as the key.".into());
+    }
+
+    let mut seen = std::collections::HashSet::<String>::new();
+    for field in &config.fields {
+        let name = field.name.trim();
+        if !is_safe_identifier(name) {
+            return Err(format!(
+                "Invalid field name '{name}'. Use only letters, numbers, and underscores; do not start with a number."
+            ));
+        }
+        if !seen.insert(name.to_lowercase()) {
+            return Err(format!("Duplicate field name '{name}'."));
+        }
     }
 
     Ok(())
@@ -796,10 +859,23 @@ pub mod tests {
                 server_port: 0,
                 api_token: TEST_TOKEN.into(),
                 table_name: "prices".into(),
-                item_id_column: "itemid".into(),
-                price_column: "price".into(),
-                denomination_column: "denomination".into(),
-                item_id_type: ItemIdType::String,
+                fields: vec![
+                    ColumnField {
+                        name: "itemid".into(),
+                        field_type: FieldType::String,
+                        is_key: true,
+                    },
+                    ColumnField {
+                        name: "price".into(),
+                        field_type: FieldType::Float,
+                        is_key: false,
+                    },
+                    ColumnField {
+                        name: "denomination".into(),
+                        field_type: FieldType::String,
+                        is_key: false,
+                    },
+                ],
             },
             Arc::new(Mutex::new(VecDeque::new())),
         )

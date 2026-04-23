@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
-type ItemIdType = "string" | "integer";
+type FieldType = "string" | "integer" | "float";
+
+type ColumnField = {
+  name: string;
+  fieldType: FieldType;
+  isKey: boolean;
+};
 
 type ServerConfig = {
   mysqlHost: string;
@@ -14,10 +20,7 @@ type ServerConfig = {
   serverPort: number;
   apiToken: string;
   tableName: string;
-  itemIdColumn: string;
-  priceColumn: string;
-  denominationColumn: string;
-  itemIdType: ItemIdType;
+  fields: ColumnField[];
 };
 
 type ServerStatus = {
@@ -57,10 +60,10 @@ const defaultConfig: ServerConfig = {
   serverPort: 8045,
   apiToken: "",
   tableName: "",
-  itemIdColumn: "itemid",
-  priceColumn: "price",
-  denominationColumn: "denomination",
-  itemIdType: "string",
+  fields: [
+    { name: "itemid", fieldType: "string", isKey: true },
+    { name: "price", fieldType: "float", isKey: false },
+  ],
 };
 
 const defaultStatus: ServerStatus = {
@@ -159,6 +162,40 @@ function App() {
     value: ServerConfig[K],
   ) {
     setConfig((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateColumnField(index: number, patch: Partial<ColumnField>) {
+    setConfig((current) => {
+      const next = current.fields.map((f, i) =>
+        i === index ? { ...f, ...patch } : f,
+      );
+      if (patch.isKey === true) {
+        for (let i = 0; i < next.length; i++) {
+          if (i !== index) next[i] = { ...next[i], isKey: false };
+        }
+      }
+      return { ...current, fields: next };
+    });
+  }
+
+  function addColumnField() {
+    setConfig((current) => ({
+      ...current,
+      fields: [
+        ...current.fields,
+        { name: "", fieldType: "string", isKey: current.fields.length === 0 },
+      ],
+    }));
+  }
+
+  function removeColumnField(index: number) {
+    setConfig((current) => {
+      const next = current.fields.filter((_, i) => i !== index);
+      if (!next.some((f) => f.isKey) && next.length > 0) {
+        next[0] = { ...next[0], isKey: true };
+      }
+      return { ...current, fields: next };
+    });
   }
 
   async function saveSettings() {
@@ -409,7 +446,7 @@ function App() {
         <section className="panel">
           <h2>Database mapping</h2>
           <div className="grid two">
-            <label>
+            <label className="span-two">
               Table name
               <input
                 value={config.tableName}
@@ -419,45 +456,61 @@ function App() {
                 placeholder="items"
               />
             </label>
-            <label>
-              Item ID type
-              <select
-                value={config.itemIdType}
-                onChange={(event) =>
-                  updateField("itemIdType", event.currentTarget.value as ItemIdType)
-                }
-              >
-                <option value="string">String</option>
-                <option value="integer">Integer</option>
-              </select>
-            </label>
-            <label>
-              Item ID column
-              <input
-                value={config.itemIdColumn}
-                onChange={(event) =>
-                  updateField("itemIdColumn", event.currentTarget.value)
-                }
-              />
-            </label>
-            <label>
-              Price column
-              <input
-                value={config.priceColumn}
-                onChange={(event) =>
-                  updateField("priceColumn", event.currentTarget.value)
-                }
-              />
-            </label>
-            <label className="span-two">
-              Denomination column
-              <input
-                value={config.denominationColumn}
-                onChange={(event) =>
-                  updateField("denominationColumn", event.currentTarget.value)
-                }
-              />
-            </label>
+          </div>
+          <div className="fields-list">
+            <div className="fields-header">
+              <span>Column name</span>
+              <span>Type</span>
+              <span>Key</span>
+              <span />
+            </div>
+            {config.fields.map((field, index) => (
+              <div className="fields-row" key={index}>
+                <input
+                  value={field.name}
+                  onChange={(event) =>
+                    updateColumnField(index, { name: event.currentTarget.value })
+                  }
+                  placeholder="column_name"
+                />
+                <select
+                  value={field.fieldType}
+                  onChange={(event) =>
+                    updateColumnField(index, {
+                      fieldType: event.currentTarget.value as FieldType,
+                    })
+                  }
+                >
+                  <option value="string">String</option>
+                  <option value="integer">Integer</option>
+                  <option value="float">Float/Decimal</option>
+                </select>
+                <label className="key-cell">
+                  <input
+                    type="radio"
+                    name="keyField"
+                    checked={field.isKey}
+                    onChange={() => updateColumnField(index, { isKey: true })}
+                  />
+                  <span>WHERE</span>
+                </label>
+                <button
+                  type="button"
+                  className="danger compact"
+                  onClick={() => removeColumnField(index)}
+                  disabled={config.fields.length <= 1}
+                >
+                  Remove
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={addColumnField}
+            >
+              + Add field
+            </button>
           </div>
         </section>
 
@@ -484,11 +537,22 @@ function App() {
         <pre>{`curl -X POST ${endpoint} \\
   -H "Content-Type: application/json" \\
   -H "X-API-Token: ${config.apiToken ? "<token>" : "your-token"}" \\
-  -d '{"itemid":"101","price":"250.00"}'`}</pre>
+  -d '${buildSampleBody(config.fields)}'`}</pre>
         {status.lastError ? <p className="error">{status.lastError}</p> : null}
       </section>
     </main>
   );
+}
+
+function buildSampleBody(fields: ColumnField[]): string {
+  const obj: Record<string, string | number> = {};
+  for (const f of fields) {
+    if (!f.name.trim()) continue;
+    if (f.fieldType === "integer") obj[f.name] = 1;
+    else if (f.fieldType === "float") obj[f.name] = 9.99;
+    else obj[f.name] = "example";
+  }
+  return JSON.stringify(obj);
 }
 
 function formatError(error: unknown) {
