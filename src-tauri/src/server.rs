@@ -31,6 +31,7 @@ pub struct ServerConfig {
     pub mysql_port: u16,
     pub mysql_database: String,
     pub mysql_username: String,
+    #[serde(default)]
     pub mysql_password: String,
     pub bind_host: String,
     pub server_port: u16,
@@ -340,13 +341,16 @@ pub async fn start_server(
 }
 
 pub async fn create_pool(config: &ServerConfig) -> Result<MySqlPool, String> {
-    let options = MySqlConnectOptions::new()
+    let mut options = MySqlConnectOptions::new()
         .host(&config.mysql_host)
         .port(config.mysql_port)
         .database(&config.mysql_database)
         .username(&config.mysql_username)
-        .password(&config.mysql_password)
         .ssl_mode(MySqlSslMode::Disabled);
+
+    if !config.mysql_password.trim().is_empty() {
+        options = options.password(&config.mysql_password);
+    }
 
     MySqlPoolOptions::new()
         .max_connections(64)
@@ -724,6 +728,24 @@ pub mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     const TEST_TOKEN: &str = "test-token";
+
+    #[test]
+    fn server_config_allows_missing_mysql_password() {
+        let config: ServerConfig = serde_json::from_value(serde_json::json!({
+            "mysqlHost": "127.0.0.1",
+            "mysqlPort": 3306,
+            "mysqlDatabase": "db",
+            "mysqlUsername": "user",
+            "bindHost": "127.0.0.1",
+            "serverPort": 8045,
+            "apiToken": "token",
+            "tableName": "prices",
+            "fields": [{ "name": "itemid", "fieldType": "string", "isKey": true }]
+        }))
+        .expect("deserialize ServerConfig without mysqlPassword");
+
+        assert!(config.mysql_password.is_empty());
+    }
 
     #[tokio::test]
     async fn update_item_updates_mysql_row() {

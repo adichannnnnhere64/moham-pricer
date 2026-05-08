@@ -40,7 +40,7 @@ Use these values in the app UI for the local Docker database:
 | Port | `3307` |
 | Database | `bugitik_test` |
 | Username | `bugitik` |
-| Password | `bugitik` |
+| Password | `bugitik` (can be empty) |
 | Bind host | `127.0.0.1` |
 | Server port | `8046` |
 | API token | `local-dev-token` |
